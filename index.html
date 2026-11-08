@@ -1,0 +1,600 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- BUILD:CUT-ABOVE -->
+<title>Avatar Dome</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+  /* One-screen stage: WebGL background fills the page, a tilting sticker avatar sits centered on top. */
+  :root {
+    --ground: #1b1b1c;
+    --ink: #e9e7ee;
+    --ink-dim: #8a8791;
+    --ring: rgba(255, 255, 255, 0.1);
+    --focus: #b9a7ff;
+    --font-ui: "Geist", ui-sans-serif, -apple-system, "Helvetica Neue", sans-serif;
+    --avatar: clamp(150px, 26vmin, 325px);
+    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+    color-scheme: dark;
+  }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-ui);
+    overflow: hidden;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas#fx {
+    position: fixed; inset: 0;
+    width: 100%; height: 100%;
+    display: block;
+  }
+  .stage {
+    position: relative;
+    height: 100%;
+    display: grid;
+    place-items: center;
+  }
+  /* Untransformed box: used for hit-testing and the shader's centre, so tilt never moves them. */
+  .tilt {
+    width: var(--avatar);
+    height: var(--avatar);
+    max-width: 100%;
+    border-radius: 50%;
+  }
+  .avatar {
+    --holo-opacity: 0.55;
+    --glare-opacity: 1;
+    position: relative;
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    border: 0;
+    padding: 0;
+    overflow: hidden;
+    cursor: pointer;
+    background: #6fb53a url("assets/avatar.jpg") center 18% / 100% auto no-repeat;
+    box-shadow:
+      0 0 0 1px var(--ring),
+      0 30px 60px -20px rgba(0, 0, 0, 0.7),
+      0 0 80px -10px rgba(140, 200, 70, 0.18);
+    will-change: transform;
+    touch-action: manipulation;
+    -webkit-mask-image: -webkit-radial-gradient(white, black); /* keeps overflow clipping round while 3D-transformed in Safari */
+  }
+  .avatar:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 6px;
+  }
+
+  /* Shiny-sticker light: a holographic foil band plus a white glare, both centred on the pointer. */
+  .holo, .glare {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 220ms var(--ease-out);
+    --mx: 50%;
+    --my: 50%;
+  }
+  .holo {
+    background:
+      repeating-linear-gradient(
+        var(--angle, 120deg),
+        #ff6fd8 0%, #ffd56b 3%, #7dffb6 6%, #6fd6ff 9%, #a98bff 12%, #ff6fd8 15%
+      );
+    background-size: 200% 200%;
+    background-position: var(--bx, 50%) var(--by, 50%);
+    mix-blend-mode: hard-light;
+    -webkit-mask-image: radial-gradient(circle at var(--mx) var(--my), #000 0%, rgba(0,0,0,0.6) 28%, transparent 68%);
+            mask-image: radial-gradient(circle at var(--mx) var(--my), #000 0%, rgba(0,0,0,0.6) 28%, transparent 68%);
+  }
+  .glare {
+    background: radial-gradient(circle at var(--mx) var(--my), rgba(255,255,255,0.65) 0%, rgba(255,255,255,0.18) 18%, transparent 46%);
+    mix-blend-mode: overlay;
+  }
+  .avatar.is-lit .holo { opacity: var(--holo-opacity); }
+  .avatar.is-lit .glare { opacity: var(--glare-opacity); }
+
+  .hint {
+    position: fixed;
+    left: 0; right: 0;
+    bottom: calc(28px + env(safe-area-inset-bottom, 0px));
+    text-align: center;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    pointer-events: none;
+    transition: opacity 300ms var(--ease-out);
+  }
+  .hint.is-gone { opacity: 0; }
+
+</style>
+<!-- Inspector: DialKit 2.1.0 by Josh Puckett (MIT), vanilla build, vendored for offline use -->
+<link rel="stylesheet" href="vendor/dialkit/styles.css">
+<!-- BUILD:HEAD-END -->
+</head>
+<body>
+<canvas id="fx" aria-hidden="true"></canvas>
+<main class="stage">
+  <div class="tilt" id="tilt">
+    <button class="avatar" id="avatar" type="button" aria-label="Avatar. Press to send a ripple">
+      <span class="holo" id="holo"></span>
+      <span class="glare" id="glare"></span>
+    </button>
+  </div>
+</main>
+<p class="hint" id="hint">Click the avatar</p>
+
+<script src="vendor/dialkit/browser.global.js"></script>
+<script>
+(() => {
+  const canvas = document.getElementById('fx');
+  const tiltBox = document.getElementById('tilt');
+  const avatar = document.getElementById('avatar');
+  const holo = document.getElementById('holo');
+  const glare = document.getElementById('glare');
+  const hint = document.getElementById('hint');
+
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const finePointer = matchMedia('(hover: hover) and (pointer: fine)').matches;
+
+  /* ---------- Tweakable settings (the inspector edits these) ---------- */
+  const DEFAULTS = {
+    // Ring
+    duration: 2.4,         // seconds
+    ease: 2.5,             // ease-out exponent: higher = faster start
+    fadeStart: 0.6,        // fraction of the run when the ring starts fading
+    thickStart: 0.22,      // tube width at start, x avatar radius
+    thickEnd: 150,         // tube width at end, css px (at least 0.9 x avatar radius)
+    // Refraction
+    refract: 0.55,         // bend strength
+    chroma: 0.1,           // colour split between R/G/B
+    // Colour band
+    bandWidth: 0.22,       // tight core, fraction of the tube
+    haloWidth: 0.6,        // soft spill, fraction of the tube
+    haloAmount: 0.22,
+    glow: 0.7,             // overall brightness
+    hueSpread: 1.6,        // rainbow repeats across the band
+    hueSpeed: 0.25,        // rainbow drift per second
+    // Background
+    ground: '#1b1b1c',
+    dotSpacing: 7,         // css px
+    dotAmount: 0.075,
+    // Avatar
+    maxTilt: 12,           // degrees
+    pressScale: 0.93,
+    tiltSpring: { stiffness: 170, damping: 22, mass: 1 },
+    releaseSpring: { stiffness: 420, damping: 16, mass: 1 },
+    holoOpacity: 0.55,
+    glareOpacity: 1,
+  };
+  const P = structuredClone(DEFAULTS);
+
+  /* ---------- Shader ---------- */
+  const MAX = 4; // rings alive at once
+
+  const vert = `
+    attribute vec2 a;
+    void main() { gl_Position = vec4(a, 0.0, 1.0); }
+  `;
+
+  const frag = `
+    precision highp float;
+    uniform vec2  uRes;      // device px
+    uniform float uDpr;
+    uniform vec2  uCenter;   // avatar centre, css px, y down
+    uniform float uAvatarR;  // css px
+    uniform float uMaxR;     // css px
+    uniform float uTime;
+    uniform float uDur;
+    uniform float uReduce;   // 1 = reduced motion: ring holds still and only fades
+    uniform float uStarts[${MAX}];
+
+    uniform float uEase, uFadeStart, uThickStart, uThickEnd;
+    uniform float uRefract, uChroma;
+    uniform float uBandW, uHaloW, uHaloAmt, uGlow, uHueSpread, uHueSpeed;
+    uniform vec3  uGround;
+    uniform float uDotSpacing, uDotAmt;
+
+    // Figma frame background: dark ground, dot grid, faded by a blurred ellipse up and left of the avatar.
+    vec3 background(vec2 p) {
+      float frameSize = uAvatarR * 2.0 * (1257.0 / 325.0);
+      vec2 q = (p - uCenter) / frameSize + 0.5;
+      float e = length((q - vec2(0.406, 0.173)) / vec2(0.387, 0.443));
+      float mask = 1.0 - smoothstep(0.55, 1.35, e);
+
+      vec2 g = mod(p, uDotSpacing) - uDotSpacing * 0.5;
+      float dot = 1.0 - smoothstep(0.55, 1.25, length(g));
+
+      vec3 base = uGround + 0.012 * (1.0 - clamp(p.y / (uRes.y / uDpr), 0.0, 1.0));
+      return base + dot * mask * vec3(uDotAmt, uDotAmt, uDotAmt * 1.07);
+    }
+
+    vec3 iridescent(float t) {
+      return 0.5 + 0.5 * cos(6.28318 * (t + vec3(0.0, 0.33, 0.67)));
+    }
+
+    void main() {
+      vec2 p = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y) / uDpr;
+
+      vec2 offR = vec2(0.0), offG = vec2(0.0), offB = vec2(0.0);
+      vec3 glow = vec3(0.0);
+
+      for (int i = 0; i < ${MAX}; i++) {
+        float start = uStarts[i];
+        if (start < 0.0) continue;
+        float prog = (uTime - start) / uDur;
+        if (prog < 0.0 || prog > 1.0) continue;
+
+        float grow = mix(1.0 - pow(1.0 - prog, uEase), 0.35, uReduce);
+        // Starts as a point at the avatar centre; the tube thickens as the ring travels
+        float w = mix(uAvatarR * uThickStart, max(uAvatarR * 0.9, uThickEnd), grow);
+        float R = mix(0.0, uMaxR + w, grow);
+
+        vec2 v = p - uCenter;
+        float dist = length(v);
+        vec2 dir = dist > 0.0 ? v / dist : vec2(0.0);
+        float ang = atan(v.y, v.x);
+
+        float s = (dist - R) / w;   // -1 inner edge, 0 crest, +1 outer edge (perfect circle)
+        float as = abs(s);
+        if (as > 1.0) continue;
+
+        float h = sqrt(max(0.0, 1.0 - as * as));            // donut cross-section height
+        float feather = 1.0 - smoothstep(0.45, 1.0, as);
+        float life = smoothstep(0.0, 0.012, prog) * (1.0 - smoothstep(uFadeStart, 1.0, prog));
+        float k = feather * life;
+
+        // Refraction: the tube acts like a convex lens, pulling the background toward its crest
+        float amp = min(w, 140.0) * uRefract;
+        vec2 o = -dir * s * (0.6 + (1.0 - h) * 1.2) * amp * k;
+        offR += o * (1.0 + uChroma);
+        offG += o;
+        offB += o * (1.0 - uChroma);
+
+        // Rainbow concentrated in a tight band on the crest, falling off softly toward both edges
+        float band = exp(-pow(s / uBandW, 2.0));
+        float halo = exp(-pow(s / uHaloW, 2.0)) * uHaloAmt;
+        float phase = s * uHueSpread + ang * 0.159 + uTime * uHueSpeed + float(i) * 0.37;
+        vec3 film = iridescent(phase);
+
+        glow += film * (band + halo) * life;
+      }
+
+      vec3 col;
+      col.r = background(p + offR).r;
+      col.g = background(p + offG).g;
+      col.b = background(p + offB).b;
+      col += glow * uGlow;
+
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `;
+
+  const UNIFORMS = ['uRes', 'uDpr', 'uCenter', 'uAvatarR', 'uMaxR', 'uTime', 'uDur', 'uReduce', 'uStarts',
+    'uEase', 'uFadeStart', 'uThickStart', 'uThickEnd', 'uRefract', 'uChroma',
+    'uBandW', 'uHaloW', 'uHaloAmt', 'uGlow', 'uHueSpread', 'uHueSpeed', 'uGround', 'uDotSpacing', 'uDotAmt'];
+
+  const starts = new Float32Array(MAX).fill(-1);
+  let slot = 0;
+  let dpr = 1;
+  let geo = { cx: 0, cy: 0, ar: 1, maxR: 1, rect: null };
+  const t0 = performance.now();
+  const now = () => (performance.now() - t0) / 1000;
+  const duration = () => (reduceMotion ? Math.min(P.duration, 0.9) : P.duration);
+
+  function hexToRgb(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255];
+  }
+
+  const gl = canvas.getContext('webgl', { antialias: false });
+  const u = {};
+  if (gl) {
+    const compile = (type, src) => {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+      return s;
+    };
+    const prog = gl.createProgram();
+    gl.attachShader(prog, compile(gl.VERTEX_SHADER, vert));
+    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, frag));
+    gl.linkProgram(prog);
+    gl.useProgram(prog);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    const loc = gl.getAttribLocation(prog, 'a');
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+    for (const name of UNIFORMS) u[name] = gl.getUniformLocation(prog, name);
+    gl.uniform1f(u.uReduce, reduceMotion ? 1 : 0);
+  }
+
+  // Read layout once per resize, never per frame. The .tilt box is never transformed.
+  function measure() {
+    const r = tiltBox.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    const w = innerWidth, h = innerHeight;
+    const far = Math.max(Math.hypot(cx, cy), Math.hypot(w - cx, cy), Math.hypot(cx, h - cy), Math.hypot(w - cx, h - cy));
+    geo = { cx, cy, ar: r.width / 2, maxR: far, rect: r };
+  }
+
+  function resize() {
+    dpr = Math.min(devicePixelRatio || 1, 2);
+    measure();
+    canvas.width = Math.round(innerWidth * dpr);
+    canvas.height = Math.round(innerHeight * dpr);
+    if (gl) {
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.uniform2f(u.uRes, canvas.width, canvas.height);
+      gl.uniform1f(u.uDpr, dpr);
+      gl.uniform2f(u.uCenter, geo.cx, geo.cy);
+      gl.uniform1f(u.uAvatarR, geo.ar);
+      gl.uniform1f(u.uMaxR, geo.maxR);
+    }
+    drawGL();
+  }
+
+  // Settings are cheap to push, so send them every frame the shader draws.
+  function pushSettings() {
+    gl.uniform1f(u.uDur, duration());
+    gl.uniform1f(u.uEase, P.ease);
+    gl.uniform1f(u.uFadeStart, Math.min(P.fadeStart, 0.99));
+    gl.uniform1f(u.uThickStart, P.thickStart);
+    gl.uniform1f(u.uThickEnd, P.thickEnd);
+    gl.uniform1f(u.uRefract, P.refract);
+    gl.uniform1f(u.uChroma, P.chroma);
+    gl.uniform1f(u.uBandW, P.bandWidth);
+    gl.uniform1f(u.uHaloW, P.haloWidth);
+    gl.uniform1f(u.uHaloAmt, P.haloAmount);
+    gl.uniform1f(u.uGlow, P.glow);
+    gl.uniform1f(u.uHueSpread, P.hueSpread);
+    gl.uniform1f(u.uHueSpeed, P.hueSpeed);
+    gl.uniform3fv(u.uGround, hexToRgb(P.ground));
+    gl.uniform1f(u.uDotSpacing, P.dotSpacing);
+    gl.uniform1f(u.uDotAmt, P.dotAmount);
+  }
+
+  function drawGL() {
+    if (!gl) return;
+    pushSettings();
+    gl.uniform1f(u.uTime, now());
+    gl.uniform1fv(u.uStarts, starts);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  const ringsAlive = () => { const t = now(); return starts.some(s => s >= 0 && t - s < duration()); };
+
+  /* ---------- Avatar springs: tilt + press scale ---------- */
+  const tiltX = { x: 0, v: 0, target: 0 };
+  const tiltY = { x: 0, v: 0, target: 0 };
+  const scale = { x: 1, v: 0, target: 1 };
+  let pressed = false;
+  const pressScale = () => (reduceMotion ? 0.98 : P.pressScale);
+
+  function stepSpring(s, k, c, dt, m = 1) {
+    const a = (-k * (s.x - s.target) - c * s.v) / m;
+    s.v += a * dt;
+    s.x += s.v * dt;
+  }
+  const settled = s => Math.abs(s.x - s.target) < 0.0005 && Math.abs(s.v) < 0.0005;
+
+  function stepAvatar(dt) {
+    // Tilt: smooth and nearly critically damped. Scale: snappy press, bouncy release.
+    const ts = P.tiltSpring, rs = P.releaseSpring;
+    stepSpring(tiltX, ts.stiffness, ts.damping, dt, ts.mass);
+    stepSpring(tiltY, ts.stiffness, ts.damping, dt, ts.mass);
+    if (pressed) stepSpring(scale, 900, 50, dt);
+    else stepSpring(scale, rs.stiffness, rs.damping, dt, rs.mass);
+    avatar.style.transform =
+      `perspective(700px) rotateX(${tiltX.x.toFixed(3)}deg) rotateY(${tiltY.x.toFixed(3)}deg) scale(${scale.x.toFixed(4)})`;
+    return !(settled(tiltX) && settled(tiltY) && settled(scale));
+  }
+
+  /* ---------- One frame loop for everything ---------- */
+  let raf = 0, last = 0;
+  function tick(ts) {
+    const dt = Math.min(0.032, last ? (ts - last) / 1000 : 0.016);
+    last = ts;
+    const avatarMoving = stepAvatar(dt);
+    const rings = ringsAlive();
+    if (rings) drawGL();
+    if (avatarMoving || rings) raf = requestAnimationFrame(tick);
+    else { raf = 0; last = 0; drawGL(); }
+  }
+  const wake = () => { if (!raf) raf = requestAnimationFrame(tick); };
+
+  /* ---------- Pointer: tilt and sticker light (fine pointers only) ---------- */
+  function setLight(px, py) {
+    const mx = `${(px * 100).toFixed(2)}%`, my = `${(py * 100).toFixed(2)}%`;
+    for (const el of [holo, glare]) {
+      el.style.setProperty('--mx', mx);
+      el.style.setProperty('--my', my);
+    }
+    // Foil band slides and rotates as the light moves, like tilting a holographic sticker
+    holo.style.setProperty('--bx', mx);
+    holo.style.setProperty('--by', my);
+    holo.style.setProperty('--angle', `${(100 + (px - 0.5) * 60).toFixed(1)}deg`);
+  }
+
+  if (finePointer) {
+    tiltBox.addEventListener('pointermove', e => {
+      const r = geo.rect;
+      const px = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+      const py = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+      setLight(px, py);
+      avatar.classList.add('is-lit');
+      if (!reduceMotion) {
+        tiltY.target = (px - 0.5) * 2 * P.maxTilt;
+        tiltX.target = -(py - 0.5) * 2 * P.maxTilt;
+        wake();
+      }
+    });
+    tiltBox.addEventListener('pointerleave', () => {
+      avatar.classList.remove('is-lit');
+      tiltX.target = 0;
+      tiltY.target = 0;
+      wake();
+    });
+  }
+
+  /* ---------- Press + ring ---------- */
+  function press() { pressed = true; scale.target = pressScale(); wake(); }
+  function release() { pressed = false; scale.target = 1; wake(); }
+
+  function ring() {
+    starts[slot] = now();
+    slot = (slot + 1) % MAX;
+    hint.classList.add('is-gone');
+    wake();
+  }
+
+  avatar.addEventListener('pointerdown', press);
+  avatar.addEventListener('pointerup', release);
+  avatar.addEventListener('pointerleave', release);
+  avatar.addEventListener('pointercancel', release);
+  avatar.addEventListener('blur', release);
+  avatar.addEventListener('click', e => {
+    // Keyboard and programmatic clicks get a quick squeeze too
+    if (e.detail === 0) { press(); setTimeout(release, 120); }
+    ring();
+  });
+
+  /* ---------- Inspector ---------- */
+  function applyCss() {
+    avatar.style.setProperty('--holo-opacity', P.holoOpacity);
+    avatar.style.setProperty('--glare-opacity', P.glareOpacity);
+    document.documentElement.style.setProperty('--ground', P.ground);
+  }
+
+  // DialKit springs come back either as physics (stiffness/damping/mass)
+  // or as time-based (visualDuration/bounce). Turn both into physics for our integrator.
+  function toPhysics(sp, fallback) {
+    if (!sp) return fallback;
+    if (sp.stiffness != null) {
+      return { stiffness: sp.stiffness, damping: sp.damping ?? fallback.damping, mass: sp.mass ?? 1 };
+    }
+    if (sp.visualDuration != null) {
+      // Same conversion Motion uses for visualDuration + bounce
+      const root = (2 * Math.PI) / (sp.visualDuration * 1.2);
+      const stiffness = root * root;
+      const damping = 2 * Math.min(1, Math.max(0.05, 1 - (sp.bounce ?? 0))) * Math.sqrt(stiffness);
+      return { stiffness, damping, mass: 1 };
+    }
+    return fallback;
+  }
+
+  // Panel values are nested by folder; P stays flat for the renderer.
+  // DialKit uses each key as its label, so keys carry the readable names and units.
+  function fromPanel(v) {
+    const ring = v['Ring motion'], lens = v['Refraction'], band = v['Colour band'];
+    const bg = v['Background'], av = v['Avatar'];
+    Object.assign(P, {
+      duration: ring['Duration (s)'],
+      ease: ring['Ease-out strength'],
+      fadeStart: ring['Fade starts at'],
+      thickStart: ring['Start width (× avatar)'],
+      thickEnd: ring['End width (px)'],
+      refract: lens['Bend strength'],
+      chroma: lens['Colour split'],
+      bandWidth: band['Core width'],
+      haloWidth: band['Feather width'],
+      haloAmount: band['Feather amount'],
+      glow: band['Brightness'],
+      hueSpread: band['Rainbow repeats'],
+      hueSpeed: band['Rainbow drift'],
+      ground: bg['Ground'],
+      dotSpacing: bg['Dot spacing (px)'],
+      dotAmount: bg['Dot brightness'],
+      maxTilt: av['Max tilt (°)'],
+      pressScale: av['Press scale'],
+      tiltSpring: toPhysics(av['Tilt spring'], DEFAULTS.tiltSpring),
+      releaseSpring: toPhysics(av['Release spring'], DEFAULTS.releaseSpring),
+      holoOpacity: av['Foil opacity'],
+      glareOpacity: av['Glare opacity'],
+    });
+  }
+
+  function onChange() {
+    applyCss();
+    if (!raf) drawGL();
+  }
+
+  function buildInspector() {
+    if (!window.DialKit) return;
+    const D = DEFAULTS;
+    DialKit.createDialRoot({ position: 'top-right', theme: 'dark', defaultOpen: innerWidth >= 520 });
+
+    const kit = DialKit.createDialKit('Avatar Dome', {
+      'Send a ring': { type: 'action' },
+      'Ring motion': {
+        'Duration (s)': [D.duration, 0.6, 6, 0.1],
+        'Ease-out strength': [D.ease, 1, 6, 0.1],
+        'Fade starts at': [D.fadeStart, 0, 0.95, 0.01],
+        'Start width (× avatar)': [D.thickStart, 0.05, 1, 0.01],
+        'End width (px)': [D.thickEnd, 40, 400, 1],
+      },
+      'Refraction': {
+        'Bend strength': [D.refract, 0, 2, 0.01],
+        'Colour split': [D.chroma, 0, 0.5, 0.01],
+      },
+      'Colour band': {
+        'Core width': [D.bandWidth, 0.03, 1, 0.01],
+        'Feather width': [D.haloWidth, 0.1, 1.5, 0.01],
+        'Feather amount': [D.haloAmount, 0, 1, 0.01],
+        'Brightness': [D.glow, 0, 2, 0.01],
+        'Rainbow repeats': [D.hueSpread, 0, 6, 0.05],
+        'Rainbow drift': [D.hueSpeed, 0, 2, 0.01],
+      },
+      'Background': {
+        'Ground': D.ground,
+        'Dot spacing (px)': [D.dotSpacing, 3, 24, 0.5],
+        'Dot brightness': [D.dotAmount, 0, 0.3, 0.005],
+      },
+      'Avatar': {
+        'Max tilt (°)': [D.maxTilt, 0, 30, 0.5],
+        'Press scale': [D.pressScale, 0.8, 1, 0.005],
+        'Tilt spring': { type: 'spring', ...D.tiltSpring },
+        'Release spring': { type: 'spring', ...D.releaseSpring },
+        'Foil opacity': [D.holoOpacity, 0, 1, 0.01],
+        'Glare opacity': [D.glareOpacity, 0, 1, 0.01],
+      },
+      'Reset to defaults': { type: 'action' },
+    }, {
+      id: 'avatar-dome-v2',
+      persist: true,
+      onAction: path => {
+        if (path === 'Send a ring') avatar.click();
+        if (path === 'Reset to defaults') kit.resetValues();
+      },
+      shortcuts: {
+        'Colour band.Core width': { key: 'w', mode: 'fine' },
+        'Refraction.Bend strength': { key: 'b' },
+      },
+    });
+
+    kit.subscribe(values => { fromPanel(values); onChange(); });
+  }
+
+  applyCss();
+  buildInspector();
+  addEventListener('resize', resize);
+  resize();
+})();
+</script>
+</body>
+</html>

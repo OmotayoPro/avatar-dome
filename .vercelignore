@@ -1,0 +1,6 @@
+# Only the site itself goes live: index.html, assets/, vendor/
+figma/
+build.py
+avatar-dome.html
+preview.html
+.DS_Store
