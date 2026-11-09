@@ -3,6 +3,28 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="A tactile avatar that tilts like a holographic sticker and sends a refracting rainbow ring across the page on click.">
+<meta name="theme-color" content="#1b1b1c">
+
+<!-- Favicons: rendered from the page with ?capture=icon -->
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/assets/icon-192.png">
+<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+
+<!-- Link preview: rendered from the page with ?capture=og.
+     SITE_URL: replace with the live address so every app can find the image. -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="Avatar Dome">
+<meta property="og:description" content="Hover to tilt it like a holographic sticker. Click to send a rainbow ring of liquid glass across the page.">
+<meta property="og:image" content="https://avatar-dome.vercel.app/assets/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="A round avatar photo with a rainbow ring of light expanding behind it on a dark dotted background">
+<meta property="og:url" content="https://avatar-dome.vercel.app/">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Avatar Dome">
+<meta name="twitter:description" content="Hover to tilt it like a holographic sticker. Click to send a rainbow ring of liquid glass across the page.">
+<meta name="twitter:image" content="https://avatar-dome.vercel.app/assets/og.png">
 <!-- BUILD:CUT-ABOVE -->
 <title>Avatar Dome</title>
 <meta name="claude:viewport-fit-sides" content="cover">
@@ -116,6 +138,14 @@
     transition: opacity 300ms var(--ease-out);
   }
   .hint.is-gone { opacity: 0; }
+
+  /* Asset capture modes (see ?capture= in the script) */
+  [data-capture="og"] { --avatar: 240px; }
+  [data-capture="icon"], [data-capture="icon"] body { background: transparent; }
+  [data-capture="icon"] body { padding: 0; }
+  [data-capture="icon"] canvas#fx { display: none; }
+  [data-capture="icon"] .tilt { width: 100vmin; height: 100vmin; }
+  [data-capture="icon"] .avatar { box-shadow: none; }
 
 </style>
 <!-- Inspector: DialKit 2.1.0 by Josh Puckett (MIT), vanilla build, vendored for offline use -->
@@ -289,7 +319,8 @@
   let dpr = 1;
   let geo = { cx: 0, cy: 0, ar: 1, maxR: 1, rect: null };
   const t0 = performance.now();
-  const now = () => (performance.now() - t0) / 1000;
+  let frozenTime = null; // set by ?capture=og to hold a ring still for the preview image
+  const now = () => frozenTime ?? (performance.now() - t0) / 1000;
   const duration = () => (reduceMotion ? Math.min(P.duration, 0.9) : P.duration);
 
   function hexToRgb(hex) {
@@ -590,10 +621,24 @@
     kit.subscribe(values => { fromPanel(values); onChange(); });
   }
 
+  // ?capture=og renders the link-preview frame; ?capture=icon renders just the round avatar.
+  // Used only to regenerate assets/og.png and the favicons.
+  const capture = new URLSearchParams(location.search).get('capture');
+  if (capture) {
+    document.documentElement.dataset.capture = capture;
+    hint.hidden = true;
+  }
+
   applyCss();
-  buildInspector();
+  if (!capture) buildInspector();
   addEventListener('resize', resize);
   resize();
+
+  if (capture === 'og') {
+    frozenTime = 10;
+    starts[0] = frozenTime - duration() * 0.13;
+    drawGL();
+  }
 })();
 </script>
 </body>
