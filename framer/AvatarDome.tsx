@@ -9,7 +9,13 @@ const DEFAULT_IMAGE = {
     alt: "Omotayo Taiwo",
 }
 
+// DialKit (Josh Puckett, MIT): vanilla ES module build, pinned. Loaded only on the live site and in Preview.
+const DIALKIT_JS = "https://cdn.jsdelivr.net/npm/dialkit@2.1.0/dist/vanilla/index.js"
+const DIALKIT_CSS = "https://cdn.jsdelivr.net/npm/dialkit@2.1.0/dist/vanilla/styles.css"
+
 const DEFAULTS = {
+    inspector: true,
+    inspectorPosition: "top-right" as "top-right" | "top-left" | "bottom-right" | "bottom-left",
     avatarSize: 240,
     label: "Avatar. Press to send a ripple",
     hint: "Click the avatar",
@@ -38,6 +44,8 @@ const DEFAULTS = {
 type SpringValue = { type?: string; stiffness?: number; damping?: number; mass?: number; duration?: number; bounce?: number }
 
 interface AvatarDomeProps {
+    inspector?: boolean
+    inspectorPosition?: "top-right" | "top-left" | "bottom-right" | "bottom-left"
     image?: { src?: string; srcSet?: string; alt?: string }
     avatarSize?: number
     label?: string
@@ -198,6 +206,84 @@ function toPhysics(sp: any, fallback: Physics): Physics {
     return fallback
 }
 
+/* ---------- DialKit inspector ---------- */
+
+type Settings = Pick<typeof DEFAULTS, "ring" | "refraction" | "band" | "background"> & {
+    avatar: typeof DEFAULTS.avatar & { tiltSpring: any; releaseSpring: any }
+}
+
+// Same labels and ranges as the standalone demo's panel. DialKit uses keys as labels.
+function dialConfig(s: Settings) {
+    return {
+        "Send a ring": { type: "action" },
+        "Ring motion": {
+            "Duration (s)": [s.ring.duration, 0.6, 6, 0.1],
+            "Ease-out strength": [s.ring.easeOut, 1, 6, 0.1],
+            "Fade starts at": [s.ring.fadeStart, 0, 0.95, 0.01],
+            "Start width (× avatar)": [s.ring.startWidth, 0.05, 1, 0.01],
+            "End width (px)": [s.ring.endWidth, 40, 400, 1],
+        },
+        Refraction: {
+            "Bend strength": [s.refraction.bend, 0, 2, 0.01],
+            "Colour split": [s.refraction.colourSplit, 0, 0.5, 0.01],
+        },
+        "Colour band": {
+            "Core width": [s.band.coreWidth, 0.03, 1, 0.01],
+            "Feather width": [s.band.featherWidth, 0.1, 1.5, 0.01],
+            "Feather amount": [s.band.featherAmount, 0, 1, 0.01],
+            Brightness: [s.band.brightness, 0, 2, 0.01],
+            "Rainbow repeats": [s.band.rainbowRepeats, 0, 6, 0.05],
+            "Rainbow drift": [s.band.rainbowDrift, 0, 2, 0.01],
+        },
+        Background: {
+            Ground: s.background.ground.startsWith("#") ? s.background.ground : "#1b1b1c",
+            "Dot spacing (px)": [s.background.dotSpacing, 3, 24, 0.5],
+            "Dot brightness": [s.background.dotBrightness, 0, 0.3, 0.005],
+        },
+        Avatar: {
+            "Max tilt (°)": [s.avatar.maxTilt, 0, 30, 0.5],
+            "Press scale": [s.avatar.pressScale, 0.8, 1, 0.005],
+            "Tilt spring": { type: "spring", ...toPhysics(s.avatar.tiltSpring, DEFAULTS.avatar.tiltSpring) },
+            "Release spring": { type: "spring", ...toPhysics(s.avatar.releaseSpring, DEFAULTS.avatar.releaseSpring) },
+            "Foil opacity": [s.avatar.foilOpacity, 0, 1, 0.01],
+            "Glare opacity": [s.avatar.glareOpacity, 0, 1, 0.01],
+        },
+        "Reset to defaults": { type: "action" },
+    }
+}
+
+function fromPanel(v: any): Settings {
+    const ring = v["Ring motion"], lens = v["Refraction"], band = v["Colour band"]
+    const bg = v["Background"], av = v["Avatar"]
+    return {
+        ring: {
+            duration: ring["Duration (s)"],
+            easeOut: ring["Ease-out strength"],
+            fadeStart: ring["Fade starts at"],
+            startWidth: ring["Start width (× avatar)"],
+            endWidth: ring["End width (px)"],
+        },
+        refraction: { bend: lens["Bend strength"], colourSplit: lens["Colour split"] },
+        band: {
+            coreWidth: band["Core width"],
+            featherWidth: band["Feather width"],
+            featherAmount: band["Feather amount"],
+            brightness: band["Brightness"],
+            rainbowRepeats: band["Rainbow repeats"],
+            rainbowDrift: band["Rainbow drift"],
+        },
+        background: { ground: bg["Ground"], dotSpacing: bg["Dot spacing (px)"], dotBrightness: bg["Dot brightness"] },
+        avatar: {
+            maxTilt: av["Max tilt (°)"],
+            pressScale: av["Press scale"],
+            tiltSpring: av["Tilt spring"],
+            releaseSpring: av["Release spring"],
+            foilOpacity: av["Foil opacity"],
+            glareOpacity: av["Glare opacity"],
+        },
+    }
+}
+
 const CSS = `
 .ad-avatar { position: relative; display: block; width: 100%; height: 100%; border-radius: 50%;
   border: 0; padding: 0; overflow: hidden; cursor: pointer; will-change: transform; touch-action: manipulation;
@@ -264,6 +350,8 @@ export default function AvatarDome(props: AvatarDomeProps) {
     const propsRef = React.useRef(p)
     propsRef.current = p
     const redrawRef = React.useRef<() => void>(() => {})
+    // Values from the DialKit panel, when it's showing. They override the Framer controls.
+    const panelRef = React.useRef<Settings | null>(null)
 
     // Canvas, export and thumbnails get a still frame; preview and the live site are interactive
     const isEditor = useIsStaticRenderer()
@@ -278,7 +366,7 @@ export default function AvatarDome(props: AvatarDomeProps) {
 
         const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches
         const finePointer = matchMedia("(hover: hover) and (pointer: fine)").matches
-        const P = () => propsRef.current
+        const P = () => (panelRef.current ? { ...propsRef.current, ...panelRef.current } : propsRef.current)
         const duration = () => (reduceMotion ? Math.min(P().ring.duration, 0.9) : P().ring.duration)
 
         /* WebGL setup */
@@ -556,6 +644,66 @@ export default function AvatarDome(props: AvatarDomeProps) {
         redrawRef.current()
     })
 
+    // DialKit inspector: live site and Preview only. Starts from the Framer control values.
+    const showInspector = p.inspector && !isEditor
+    React.useEffect(() => {
+        if (!showInspector || typeof window === "undefined") return
+        let cancelled = false
+        let kit: any = null
+        let dialRoot: any = null
+
+        if (!document.getElementById("dialkit-styles")) {
+            const link = document.createElement("link")
+            link.id = "dialkit-styles"
+            link.rel = "stylesheet"
+            link.href = DIALKIT_CSS
+            document.head.appendChild(link)
+        }
+
+        const src = DIALKIT_JS // a variable, so Framer's bundler leaves the URL to the browser
+        import(/* webpackIgnore: true */ src)
+            .then((DialKit: any) => {
+                if (cancelled) return
+                const start = propsRef.current
+                dialRoot = DialKit.createDialRoot({
+                    position: start.inspectorPosition,
+                    theme: "dark",
+                    defaultOpen: window.innerWidth >= 520,
+                })
+                kit = DialKit.createDialKit("Avatar Dome", dialConfig(start as Settings), {
+                    onAction: (path: string) => {
+                        if (path === "Send a ring") avatarRef.current?.click()
+                        if (path === "Reset to defaults") kit?.resetValues()
+                    },
+                    shortcuts: {
+                        "Colour band.Core width": { key: "w", mode: "fine" },
+                        "Refraction.Bend strength": { key: "b" },
+                    },
+                })
+                kit.subscribe((values: any) => {
+                    const s = fromPanel(values)
+                    panelRef.current = s
+                    const el = avatarRef.current
+                    if (el) {
+                        el.style.setProperty("--holo-opacity", String(s.avatar.foilOpacity))
+                        el.style.setProperty("--glare-opacity", String(s.avatar.glareOpacity))
+                    }
+                    redrawRef.current()
+                })
+            })
+            .catch(() => {
+                // Panel is optional: if the CDN is unreachable, the effect still runs on the Framer values
+            })
+
+        return () => {
+            cancelled = true
+            kit?.destroy()
+            dialRoot?.destroy()
+            panelRef.current = null
+            redrawRef.current()
+        }
+    }, [showInspector, p.inspectorPosition])
+
     const src = p.image?.src
     const avatarStyle = {
         background: src ? `#6fb53a url("${src}") center 18% / cover no-repeat` : "radial-gradient(circle at 50% 35%, #9bd36b, #4f8f2a)",
@@ -623,6 +771,20 @@ const slider = (title: string, defaultValue: number, min: number, max: number, s
 })
 
 addPropertyControls(AvatarDome, {
+    inspector: {
+        type: ControlType.Boolean,
+        title: "Inspector",
+        defaultValue: DEFAULTS.inspector,
+        description: "DialKit panel on the live site and in Preview. Its values override these controls.",
+    },
+    inspectorPosition: {
+        type: ControlType.Enum,
+        title: "Panel",
+        defaultValue: DEFAULTS.inspectorPosition,
+        options: ["top-right", "top-left", "bottom-right", "bottom-left"],
+        optionTitles: ["Top Right", "Top Left", "Bottom Right", "Bottom Left"],
+        hidden: (props: AvatarDomeProps) => props.inspector === false,
+    },
     image: { type: ControlType.ResponsiveImage, title: "Photo" },
     avatarSize: slider("Size", DEFAULTS.avatarSize, 80, 480, 1, "px"),
     hint: { type: ControlType.String, title: "Hint", defaultValue: DEFAULTS.hint, placeholder: "Leave empty to hide" },
