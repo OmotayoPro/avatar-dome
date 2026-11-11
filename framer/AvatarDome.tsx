@@ -310,12 +310,21 @@ const CSS = `
   transition: opacity 300ms cubic-bezier(0.23, 1, 0.32, 1); }
 .ad-hint.is-gone { opacity: 0; }
 
-/* DialKit panel: sit 56px below the top of the viewport (DialKit's own default is 16px),
-   keeping a 16px gap at the bottom. Extra specificity beats DialKit's stylesheet. */
+/* DialKit panel: 56px below the top of the viewport (DialKit's default is 16px), and at most
+   100vh - 56px tall so it ends at the bottom edge; the rest scrolls inside the panel.
+   DialKit sets the inner max-height inline, so these need !important. dvh follows mobile toolbars. */
 html body .dialkit-panel[data-position="top-right"],
-html body .dialkit-panel[data-position="top-left"] { top: 56px; max-height: calc(100vh - 72px); }
+html body .dialkit-panel[data-position="top-left"] {
+  top: 56px !important;
+  max-height: calc(100vh - 56px) !important;
+  max-height: calc(100dvh - 56px) !important;
+}
 html body .dialkit-panel[data-position="top-right"] .dialkit-panel-inner,
-html body .dialkit-panel[data-position="top-left"] .dialkit-panel-inner { max-height: calc(100vh - 120px); overflow-y: auto; }
+html body .dialkit-panel[data-position="top-left"] .dialkit-panel-inner {
+  max-height: calc(100vh - 56px) !important;
+  max-height: calc(100dvh - 56px) !important;
+  overflow-y: auto !important;
+}
 `
 
 /* ---------- Component ---------- */
