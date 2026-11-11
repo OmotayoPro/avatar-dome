@@ -1,18 +1,13 @@
 import * as React from "react"
-import { addPropertyControls, ControlType, RenderTarget } from "framer"
-
-/**
- * Avatar Dome
- * Hover tilts the avatar like a holographic sticker. Click sends an
- * iridescent liquid ring out from behind it, bending the dotted background.
- *
- * @framerSupportedLayoutWidth any-prefer-fixed
- * @framerSupportedLayoutHeight any-prefer-fixed
- * @framerIntrinsicWidth 1200
- * @framerIntrinsicHeight 800
- */
+import type { CSSProperties } from "react"
+import { addPropertyControls, ControlType, useIsStaticRenderer } from "framer"
 
 /* ---------- Defaults (same values as the standalone demo) ---------- */
+
+const DEFAULT_IMAGE = {
+    src: "https://framerusercontent.com/images/b5xlX8MJJGzRv7Xv3TYrxwr7G6E.jpg",
+    alt: "Omotayo Taiwo",
+}
 
 const DEFAULTS = {
     avatarSize: 240,
@@ -33,16 +28,30 @@ const DEFAULTS = {
     avatar: {
         maxTilt: 12,
         pressScale: 0.93,
-        tiltSpring: { type: "spring", stiffness: 170, damping: 22, mass: 1 },
-        releaseSpring: { type: "spring", stiffness: 420, damping: 16, mass: 1 },
+        tiltSpring: { type: "spring" as const, stiffness: 170, damping: 22, mass: 1 },
+        releaseSpring: { type: "spring" as const, stiffness: 420, damping: 16, mass: 1 },
         foilOpacity: 0.55,
         glareOpacity: 1,
     },
 }
 
-type Props = Partial<typeof DEFAULTS> & {
-    image?: { src?: string; alt?: string }
-    style?: React.CSSProperties
+type SpringValue = { type?: string; stiffness?: number; damping?: number; mass?: number; duration?: number; bounce?: number }
+
+interface AvatarDomeProps {
+    image?: { src?: string; srcSet?: string; alt?: string }
+    avatarSize?: number
+    label?: string
+    hint?: string
+    previewInEditor?: boolean
+    ring?: Partial<typeof DEFAULTS.ring>
+    refraction?: Partial<typeof DEFAULTS.refraction>
+    band?: Partial<typeof DEFAULTS.band>
+    background?: Partial<typeof DEFAULTS.background>
+    avatar?: Partial<Omit<typeof DEFAULTS.avatar, "tiltSpring" | "releaseSpring">> & {
+        tiltSpring?: SpringValue
+        releaseSpring?: SpringValue
+    }
+    style?: CSSProperties
 }
 
 /* ---------- Shader ---------- */
@@ -218,11 +227,24 @@ const CSS = `
 
 /* ---------- Component ---------- */
 
-export default function AvatarDome(props: Props) {
+/**
+ * Avatar Dome
+ * Hover tilts the avatar like a holographic sticker. Click sends an
+ * iridescent liquid ring out from behind it, bending the dotted background.
+ *
+ * @framerIntrinsicWidth 1200
+ * @framerIntrinsicHeight 800
+ *
+ * @framerSupportedLayoutWidth any-prefer-fixed
+ * @framerSupportedLayoutHeight any-prefer-fixed
+ */
+export default function AvatarDome(props: AvatarDomeProps) {
+    const { image = DEFAULT_IMAGE } = props
     // Merge each group so a missing field never breaks the shader
     const p = {
         ...DEFAULTS,
         ...props,
+        image,
         ring: { ...DEFAULTS.ring, ...props.ring },
         refraction: { ...DEFAULTS.refraction, ...props.refraction },
         band: { ...DEFAULTS.band, ...props.band },
@@ -243,7 +265,8 @@ export default function AvatarDome(props: Props) {
     propsRef.current = p
     const redrawRef = React.useRef<() => void>(() => {})
 
-    const isEditor = RenderTarget.current() === RenderTarget.canvas
+    // Canvas, export and thumbnails get a still frame; preview and the live site are interactive
+    const isEditor = useIsStaticRenderer()
 
     React.useEffect(() => {
         const root = rootRef.current!
